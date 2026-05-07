@@ -6,31 +6,28 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import time
+import os
 
-# Komponent auto-refresh (opcjonalny)
 try:
     from streamlit_autorefresh import st_autorefresh
     AUTO_REFRESH_AVAILABLE = True
 except ImportError:
     AUTO_REFRESH_AVAILABLE = False
-    st.warning("Zainstaluj `streamlit-autorefresh` dla auto-odświeżania")
 
-st.set_page_config(page_title="Monitor SP18 v6.0", page_icon="🏫", layout="centered")
+st.set_page_config(page_title="Monitor SP18 v6.1", page_icon="🏫", layout="centered")
 
-# Inicjalizacja sesji
 if 'last_data' not in st.session_state:
     st.session_state.last_data = json.dumps([], ensure_ascii=False)
 
-st.title("🏫 Monitor SP18 v6.0")
+st.title("🏫 Monitor SP18 v6.1")
 
 target_name = st.text_input("Nauczyciel:", "Pielok-Opara")
-check_now = st.button("🔍 SPRAWDŹ TERAZ (Odblokuj Głos)", use_container_width=True)
-auto_check = st.checkbox("Auto-sprawdzaj co 2 minuty")
+check_now = st.button("🔍 SPRAWDŹ TERAZ", use_container_width=True)
+auto_check = st.checkbox("Auto co 2 min")
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource
 def get_driver_options():
     options = Options()
     options.add_argument("--headless=new")
@@ -39,27 +36,33 @@ def get_driver_options():
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
     options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--disable-extensions")
     return options
 
 def get_substitutions(name):
-    service = Service(ChromeDriverManager().install())
+    chromedriver_path = shutil.which('chromedriver') or '/usr/bin/chromedriver'
+    if not os.path.exists(chromedriver_path):
+        return json.dumps([], ensure_ascii=False)
+    
+    service = Service(chromedriver_path)
     options = get_driver_options()
     
-    for attempt in range(3):  # Retry 3x
+    for attempt in range(3):
         driver = None
         try:
             driver = webdriver.Chrome(service=service, options=options)
+            driver.set_page_load_timeout(30)
             driver.get("https://sp18.chorzow.pl/substitution/")
-            wait = WebDriverWait(driver, 20)
             
+            wait = WebDriverWait(driver, 20)
             try:
                 btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Informacje dla nauczycieli')]")))
                 driver.execute_script("arguments[0].click();", btn)
                 time.sleep(4)
             except:
-                st.warning("Przycisk nie klikalny, kontynuuję...")
+                pass
             
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             sections = soup.find_all("div", class_="section print-nobreak")
@@ -80,46 +83,40 @@ def get_substitutions(name):
             return json.dumps(raw_entries, ensure_ascii=False)
             
         except Exception as e:
-            st.error(f"Próba {attempt+1} nieudana: {str(e)}")
+            st.error(f"Próba {attempt+1}: {str(e)}")
             time.sleep(2)
         finally:
             if driver:
                 driver.quit()
-    
     return json.dumps([], ensure_ascii=False)
 
-# Auto-refresh jeśli włączony
 if AUTO_REFRESH_AVAILABLE and auto_check:
-    st_autorefresh(interval=120000, limit=None, key="auto_refresh")
+    st_autorefresh(interval=120000)
 
-# Główna logika na przycisk lub auto
 if check_now or auto_check:
-    with st.spinner('Sprawdzam zastępstwa...'):
+    with st.spinner('Ładuję...'):
         results_str = get_substitutions(target_name)
         current_data_str = results_str
-        full_speech_text = ""
         is_new = current_data_str != st.session_state.last_data
-        
         results = json.loads(results_str)
+        full_speech_text = ""
         
         if results:
-            st.warning(f"🔔 Znaleziono zastępstwa dla: {target_name}")
+            st.warning(f"🔔 Zastępstwa dla {target_name}")
             for p, i in results:
                 with st.expander(f"Lekcja {p}", expanded=is_new):
-                    st.write(f"**Dotyczy klasy:** {i.replace('➔', ' ➡️ ')}")
-                
+                    st.write(f"**Klasa:** {i.replace('➔', ' ➡️ ')}")
                 if is_new:
                     clean_info = i.replace(":", " ", 1).replace("➔", " zamiana na ")
-                    full_speech_text += f"Lekcja {p}, klasa {clean_info}. "
+                    full_speech_text += f"Lekcja {p}, {clean_info}. "
         else:
-            st.success(f"✅ Brak zastępstw dla {target_name}")
+            st.success("✅ Brak zastępstw")
             if is_new:
-                full_speech_text = f"Brak nowych zastępstw dla {target_name}."
+                full_speech_text = f"Brak zastępstw {target_name}."
         
-        # Głos jeśli nowe
         if is_new and full_speech_text:
             st.session_state.last_data = current_data_str
-            js_text = full_speech_text.replace('"', '').replace("'", "").replace("\\n", " ")
+            js_text = full_speech_text.replace('"', "'")
             st.components.v1.html(f"""
                 <script>
                 if ('speechSynthesis' in window) {{
@@ -132,5 +129,4 @@ if check_now or auto_check:
                 </script>
             """, height=0)
 
-st.divider()
-st.caption(f"v6.0 | Ostatnia zmiana: {st.session_state.last_data[:50]}... | {time.strftime('%H:%M:%S')}")
+st.caption(f"v6.1 | {time.strftime('%H:%M:%S')}")
